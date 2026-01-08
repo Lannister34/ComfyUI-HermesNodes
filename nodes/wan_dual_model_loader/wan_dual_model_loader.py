@@ -100,20 +100,22 @@ class WANDualModelLoader:
             "required": {
                 "model_high": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "The HIGH noise model (handles initial denoising)."}),
                 "model_low": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "The LOW noise model (handles final denoising)."}),
-                "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2", "fp16", "bf16", "fp32"], {"tooltip": "Weight precision for both models."}),
+                "clip_name": (folder_paths.get_filename_list("text_encoders"), {"tooltip": "CLIP/T5 text encoder for WAN."}),
+                "vae_name": (folder_paths.get_filename_list("vae"), {"tooltip": "VAE for encoding/decoding latents."}),
+                "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2", "fp16", "bf16", "fp32"], {"tooltip": "Weight precision for diffusion models."}),
                 "compute_dtype": (["default", "fp16", "bf16", "fp32"], {"default": "default", "tooltip": "Compute precision for inference."}),
                 "shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1, "tooltip": "Shift parameter for noise schedule. Higher = more denoising in early steps. WAN 2.2 typically uses 8-17."}),
                 "sage_attention": (SAGEATTN_MODES, {"default": "disabled", "tooltip": "SageAttention mode for faster inference."}),
             }
         }
 
-    RETURN_TYPES = ("MODEL", "MODEL")
-    RETURN_NAMES = ("model_high", "model_low")
+    RETURN_TYPES = ("MODEL", "MODEL", "CLIP", "VAE")
+    RETURN_NAMES = ("model_high", "model_low", "clip", "vae")
     FUNCTION = "load_models"
     CATEGORY = "loaders"
-    DESCRIPTION = "Loads HIGH and LOW WAN models with shared parameters and shift for dual sampling."
+    DESCRIPTION = "Loads HIGH/LOW WAN models, CLIP, and VAE with shared parameters."
 
-    def load_models(self, model_high, model_low, weight_dtype, compute_dtype, shift, sage_attention):
+    def load_models(self, model_high, model_low, clip_name, vae_name, weight_dtype, compute_dtype, shift, sage_attention):
         model_options = {}
 
         # Set weight dtype
@@ -159,4 +161,20 @@ class WANDualModelLoader:
             loaded_low = apply_sage_attention(loaded_low, sage_attention)
             logger.info(f"Applied SageAttention mode: {sage_attention}")
 
-        return (loaded_high, loaded_low)
+        # Load CLIP (WAN type)
+        clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
+        clip = comfy.sd.load_clip(
+            ckpt_paths=[clip_path],
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            clip_type=comfy.sd.CLIPType.WAN
+        )
+        logger.info(f"Loaded CLIP: {clip_name}")
+
+        # Load VAE
+        vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+        vae_sd = comfy.utils.load_torch_file(vae_path)
+        vae = comfy.sd.VAE(sd=vae_sd)
+        vae.throw_exception_if_invalid()
+        logger.info(f"Loaded VAE: {vae_name}")
+
+        return (loaded_high, loaded_low, clip, vae)
