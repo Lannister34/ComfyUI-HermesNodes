@@ -1,0 +1,12 @@
+[project]
+name = "comfyui-hermes-nodes"
+description = "WAN Dual LoRA Loader for WAN 2.2 workflows with preset management"
+version = "1.1.0"
+license = { file = "LICENSE" }
+
+[project.urls]
+Repository = "https://github.com/Lannister34/ComfyUI-HermesNodes"
+
+[tool.comfy]
+PublisherId = "lannister34"
+DisplayName = "Hermes Nodes"
