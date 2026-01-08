@@ -312,13 +312,16 @@ async def presets_delete_list(request):
 
 # Import nodes
 from .nodes.wan_dual_lora import WANDualLoraLoader
+from .nodes.wan_dual_ksampler import WANDualKSampler
 
 NODE_CLASS_MAPPINGS = {
     "WANDualLoraLoader": WANDualLoraLoader,
+    "WANDualKSampler": WANDualKSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WANDualLoraLoader": "WAN Dual LoRA Loader",
+    "WANDualKSampler": "WAN Dual KSampler",
 }
 
 WEB_DIRECTORY = "./nodes/wan_dual_lora/web"
