@@ -5,9 +5,101 @@ WAN Dual LoRA Loader with preset management.
 
 import os
 import re
+import time
 import folder_paths
 from aiohttp import web
 from server import PromptServer
+
+# ============== Global Node Timing Hook ==============
+# This wraps ALL node executions to log timing and save to database
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+_current_prompt_id = None
+_current_run_id = None
+_workflow_start_time = None
+
+def install_timing_hook():
+    """Install a hook to time all node executions and save to database."""
+    global _current_prompt_id, _current_run_id, _workflow_start_time
+    try:
+        import execution
+        from timing import start_run, end_run, record_node
+
+        original_execute = execution.execute
+
+        async def timed_execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs):
+            global _current_prompt_id, _current_run_id, _workflow_start_time
+
+            # Start new run if prompt changed
+            if prompt_id != _current_prompt_id:
+                if _current_run_id is not None:
+                    end_run()
+                _current_prompt_id = prompt_id
+                _current_run_id = start_run(prompt_id)
+                _workflow_start_time = time.time()
+                print(f"\n[TIMING] ========== PROMPT {prompt_id} START ==========")
+
+            unique_id = current_item
+            try:
+                node_class = dynprompt.get_node(unique_id).get("class_type", "Unknown")
+            except:
+                node_class = "Unknown"
+
+            t0 = time.time()
+
+            # Call original execute
+            result = await original_execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs)
+
+            t1 = time.time()
+            elapsed = t1 - t0
+
+            # Record to database
+            record_node(unique_id, node_class, t0, t1)
+
+            # Print timing for this node (skip very fast nodes <0.01s)
+            if elapsed >= 0.01:
+                print(f"[TIMING] {node_class} ({unique_id}): {elapsed:.2f}s")
+
+            return result
+
+        execution.execute = timed_execute
+
+        # Hook into PromptServer to detect workflow completion
+        def on_prompt_complete(prompt_id):
+            global _current_prompt_id, _current_run_id, _workflow_start_time
+            if _workflow_start_time is not None and prompt_id == _current_prompt_id:
+                total = time.time() - _workflow_start_time
+                print(f"[TIMING] ========== PROMPT {prompt_id} TOTAL: {total:.2f}s ==========\n")
+                end_run()
+                _current_run_id = None
+                _workflow_start_time = None
+
+        # Register completion handler via PromptServer
+        from server import PromptServer
+
+        original_send_sync = PromptServer.instance.send_sync
+        def patched_send_sync(event, data, sid=None):
+            result = original_send_sync(event, data, sid)
+            # Detect execution complete event
+            if event == "executing" and data.get("node") is None:
+                prompt_id = data.get("prompt_id")
+                if prompt_id:
+                    on_prompt_complete(prompt_id)
+            return result
+        PromptServer.instance.send_sync = patched_send_sync
+
+        print("[TIMING] Global node timing hook installed (with DB logging)")
+        print("[TIMING] View results at http://localhost:8189 (run: python timing/server.py)")
+
+    except Exception as e:
+        print(f"[TIMING] Could not install timing hook: {e}")
+        import traceback
+        traceback.print_exc()
+
+# Install the timing hook on module load
+install_timing_hook()
 
 # Register custom WAN LoRA folder paths for I2V and T2V
 models_dir = folder_paths.models_dir
@@ -312,19 +404,18 @@ async def presets_delete_list(request):
 
 # Import nodes
 from .nodes.wan_dual_lora import WANDualLoraLoader
-from .nodes.wan_dual_ksampler import WANDualKSampler
-from .nodes.wan_dual_model_loader import WANDualModelLoader
+from .nodes.wan_dual_ksampler import WANDualKSampler, WANDualKSamplerBeta
 
 NODE_CLASS_MAPPINGS = {
     "WANDualLoraLoader": WANDualLoraLoader,
     "WANDualKSampler": WANDualKSampler,
-    "WANDualModelLoader": WANDualModelLoader,
+    "WANDualKSamplerBeta": WANDualKSamplerBeta,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WANDualLoraLoader": "WAN Dual LoRA Loader",
     "WANDualKSampler": "WAN Dual KSampler",
-    "WANDualModelLoader": "WAN Dual Model Loader",
+    "WANDualKSamplerBeta": "WAN Dual KSampler (Boundary)",
 }
 
 WEB_DIRECTORY = "./nodes/wan_dual_lora/web"

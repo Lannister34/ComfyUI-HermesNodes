@@ -4,6 +4,7 @@ Loads and applies LoRAs to HIGH and LOW WAN models independently
 """
 
 import logging
+import time
 from typing import Union
 
 import folder_paths
@@ -150,6 +151,12 @@ class WANDualLoraLoader:
         Process HIGH and LOW LoRAs and apply them to respective models.
         Also processes wildcards in the prompt.
         """
+        total_start = time.time()
+        print(f"\n[TIMING] ===== WANDualLoraLoader START =====")
+
+        high_loras_applied = 0
+        low_loras_applied = 0
+
         for key, value in kwargs.items():
             key_upper = key.upper()
 
@@ -157,26 +164,32 @@ class WANDualLoraLoader:
             if key_upper.startswith('HIGH_LORA_'):
                 if isinstance(value, dict) and 'on' in value and 'lora' in value and 'strength' in value:
                     if value['on'] and value['strength'] != 0 and value['lora']:
+                        t0 = time.time()
                         lora = load_lora_file(value['lora'], 'high')
                         if lora is not None:
                             model_high, _ = comfy.sd.load_lora_for_models(
                                 model_high, None, lora, value['strength'], 0
                             )
-                            logger.info(f"Applied HIGH LoRA: {value['lora']} (strength: {value['strength']})")
+                            high_loras_applied += 1
+                            print(f"[TIMING] HIGH LoRA '{value['lora']}' (str={value['strength']}): {time.time() - t0:.2f}s")
 
             # Process LOW LoRAs
             elif key_upper.startswith('LOW_LORA_'):
                 if isinstance(value, dict) and 'on' in value and 'lora' in value and 'strength' in value:
                     if value['on'] and value['strength'] != 0 and value['lora']:
+                        t0 = time.time()
                         lora = load_lora_file(value['lora'], 'low')
                         if lora is not None:
                             model_low, _ = comfy.sd.load_lora_for_models(
                                 model_low, None, lora, value['strength'], 0
                             )
-                            logger.info(f"Applied LOW LoRA: {value['lora']} (strength: {value['strength']})")
+                            low_loras_applied += 1
+                            print(f"[TIMING] LOW LoRA '{value['lora']}' (str={value['strength']}): {time.time() - t0:.2f}s")
 
         # Process wildcards in prompt
         processed_prompt = process_wildcards(prompt, seed) if prompt else ""
+
+        print(f"[TIMING] ===== WANDualLoraLoader TOTAL: {time.time() - total_start:.2f}s (HIGH: {high_loras_applied}, LOW: {low_loras_applied}) =====\n")
 
         return (model_high, model_low, processed_prompt)
 
