@@ -7,6 +7,7 @@ import os
 import uuid
 from fractions import Fraction
 
+import numpy as np
 import torch
 import folder_paths
 from comfy.cli_args import args
@@ -73,7 +74,7 @@ def _pick_codec(codec):
 
 
 def encode_mp4(frames, fps, out_path, crf=18, codec="auto", audio=None, metadata=None):
-    """Encode uint8 [F,H,W,3] RGB frames (plus optional AUDIO) to an h264 mp4."""
+    """Encode uint8 [F,H,W,C] frames (RGB, RGBA or grey, plus optional AUDIO) to an h264 mp4."""
     chosen = _pick_codec(codec)
     try:
         _encode_with(frames, fps, out_path, crf, chosen, audio, metadata)
@@ -97,9 +98,19 @@ def _remove_quietly(path):
         pass
 
 
+def _as_rgb(frames):
+    channels = frames.shape[-1]
+    if channels > 3:
+        return frames[..., :3]
+    if channels < 3:
+        return np.repeat(frames[..., :1], 3, axis=-1)
+    return frames
+
+
 def _encode_with(frames, fps, out_path, crf, codec, audio, metadata):
     import av
 
+    frames = _as_rgb(frames)
     num_frames, h, w, _ = frames.shape
     # yuv420p needs even dimensions
     if h % 2 or w % 2:
