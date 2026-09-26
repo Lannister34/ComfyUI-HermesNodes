@@ -1,5 +1,7 @@
 import os
 import random
+import re
+import sys
 import uuid
 
 import numpy as np
@@ -10,6 +12,15 @@ import folder_paths
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
 PREVIEW_MAX_SIDE = 1024
+_BARE_DRIVE = re.compile(r"^[A-Za-z]:$")
+
+
+def normalize_folder(path):
+    """Strip the path; on Windows a bare "D:" is the drive root, not the drive's current directory."""
+    path = path.strip()
+    if sys.platform == "win32" and _BARE_DRIVE.match(path):
+        return path + "\\"
+    return path
 
 
 def list_images(folder_path, recursive):
@@ -57,7 +68,7 @@ class RandomImageLoader:
     DESCRIPTION = "Loads a seeded random image from a folder (png, jpg, webp, bmp, tiff)."
 
     def load_random(self, folder_path, seed, recursive):
-        folder_path = folder_path.strip()
+        folder_path = normalize_folder(folder_path)
         if not os.path.isdir(folder_path):
             raise ValueError(f"Random Image Loader: folder not found: {folder_path!r}")
 

@@ -12,6 +12,8 @@ import sys
 from aiohttp import web
 from server import PromptServer
 
+from .random_image_loader import normalize_folder
+
 
 def _roots():
     if sys.platform == "win32":
@@ -32,6 +34,7 @@ async def browse_folder(request):
             return web.json_response({"folders": _roots(), "path": ""})
         path = "/"
 
+    path = normalize_folder(path)
     if not os.path.isdir(path):
         return web.json_response({"error": "Not a directory"}, status=400)
 
