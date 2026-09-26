@@ -49,8 +49,8 @@ async def find_match(request):
         return _error("Invalid JSON body")
     lora_name = data.get("lora_name")
     source_type = str(data.get("source_type", "")).lower()
-    if not lora_name or source_type not in MODEL_TYPES:
-        return _error("lora_name and source_type ('high' or 'low') are required")
+    if not isinstance(lora_name, str) or not lora_name or source_type not in MODEL_TYPES:
+        return _error("lora_name (a string) and source_type ('high' or 'low') are required")
     target_type = "low" if source_type == "high" else "high"
     return web.json_response({"match": find_matching_lora(lora_name, target_type)})
 
