@@ -1193,20 +1193,8 @@ app.registerExtension({
         // Override computeSize
         const origComputeSize = nodeType.prototype.computeSize;
         nodeType.prototype.computeSize = function() {
-            let size = origComputeSize ? origComputeSize.apply(this, arguments) : [200, 100];
-
-            const highRows = this.highLoras ? this.highLoras.length : 0;
-            const lowRows = this.lowLoras ? this.lowLoras.length : 0;
-            const maxRows = Math.max(highRows, lowRows, 0);
-
-            // Calculate needed height: base + lora panel + preset section
-            const baseHeight = 130; // model inputs, prompt, seed
-            const loraHeight = HEADER_HEIGHT + (maxRows * ROW_HEIGHT) + ROW_HEIGHT + 12;
-            const presetHeight = PRESET_SECTION_HEIGHT + 8;
-
-            size[1] = Math.max(size[1], baseHeight + loraHeight + presetHeight);
+            const size = origComputeSize ? origComputeSize.apply(this, arguments) : [340, 100];
             size[0] = Math.max(size[0], 340);
-
             return size;
         };
     }
