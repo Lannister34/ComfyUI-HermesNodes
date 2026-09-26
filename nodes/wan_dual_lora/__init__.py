@@ -2,7 +2,11 @@
 WAN Dual LoRA Loader Node Package
 """
 
+from .lora_paths import register_folders
 from .wan_lora_loader import WANDualLoraLoader
-from .presets import preset_manager
 
-__all__ = ["WANDualLoraLoader", "preset_manager"]
+register_folders()
+
+from . import routes  # noqa: E402,F401  (registers the LoRA list / preset API)
+
+__all__ = ["WANDualLoraLoader"]

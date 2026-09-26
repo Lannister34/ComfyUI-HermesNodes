@@ -1,66 +1,66 @@
 # Hermes Nodes
 
-A collection of useful custom nodes for ComfyUI.
+Custom nodes for ComfyUI: WAN 2.2 dual-model (HIGH/LOW noise) LoRA loading and sampling,
+image prep helpers, and in-graph video preview/compare.
 
 Feature requests and bug reports are welcome - please open an issue on GitHub.
 
-
 ## Installation
 
-Clone the repo to `custom_nodes` folder
+- **ComfyUI Manager / Registry:** search for "Hermes Nodes".
+- **Manual:** clone into `ComfyUI/custom_nodes` and restart ComfyUI:
+  ```
+  git clone https://github.com/Lannister34/ComfyUI-HermesNodes custom_nodes/hermes-nodes
+  ```
+
+No extra Python dependencies - everything used ships with ComfyUI.
 
 ## Nodes
 
-### WAN Dual LoRA Loader
+| Node | Category | What it does |
+|------|----------|--------------|
+| WAN Dual LoRA Loader | `loaders/wan` | Separate LoRA stacks for the HIGH and LOW models, presets, wildcard prompt |
+| WAN Dual KSampler | `sampling` | HIGH model for the first `switch_step` steps, LOW model for the rest; separate CFG per phase |
+| WAN Dual KSampler (Boundary) | `sampling` | Same, but switches where the timestep crosses `boundary` (0.875 T2V / 0.9 I2V) |
+| Image Scale To | `hermes/image` | Scale so the shorter/longer side hits a size, keep aspect, snap to a multiple (e.g. 16) |
+| Pad Image to Square | `hermes/image` | Scale longest side to `size` and center on a square canvas of a fill color |
+| Random Image Loader | `hermes/image` | Seeded random image from a folder, with a folder picker and in-node preview |
+| Video Preview | `hermes/video` | Encode frames (+ audio) to mp4 and play in the node: autoplay, sound on hover, click to pause |
+| Video Player | `hermes/video` | Same encoding, native player controls for scrubbing |
+| Video Compare (Side-by-Side) | `hermes/video` | Tile up to 6 videos into one grid clip for A/B comparisons |
 
-A specialized LoRA loader designed for WAN 2.2 architecture, which uses separate HIGH and LOW noise models.
+Node ids (for API-format workflows): `WANDualLoraLoader`, `WANDualKSampler`, `WANDualKSamplerBeta`,
+and `Hermes` + the node name for the rest (`HermesImageResize`, `HermesVideoPreview`, ...).
+
+Video nodes save to `temp/` by default (preview only); enable `save_output` to write to `output/`.
+Saved mp4 files embed the workflow, so they can be dragged back into ComfyUI.
+
+### WAN Dual LoRA Loader
 
 ![WAN Dual LoRA Loader](images/WanDualLoraLoader.png)
 
-#### Key Features
+LoRAs are read from a dedicated folder tree (created on first start):
 
-- **Two-Column Layout** - Separate LoRA lists for HIGH and LOW noise models
-- **I2V/T2V Folder Structure** - Organize LoRAs by type:
-  ```
-  models/loras/wan/
-  ├── I2V/
-  │   ├── HIGH/
-  │   └── LOW/
-  └── T2V/
-      ├── HIGH/
-      └── LOW/
-  ```
-- **Shared Folders** - LoRAs placed in `I2V/` or `T2V/` root (not in HIGH/LOW subfolders) appear in both lists
-- **Preset System** - Save and load LoRA+prompt configurations
-- **Multiple Preset Lists** - Organize presets into categories (Default, I2V, T2V)
-- **Wildcard Prompt Processing** - Built-in wildcard support in the prompt field
-- **Auto-Match** - Automatically finds matching LoRAs between HIGH/LOW folders
+```
+models/loras/wan/
+├── I2V/          <- LoRAs here appear in both HIGH and LOW lists
+│   ├── HIGH/
+│   └── LOW/
+└── T2V/
+    ├── HIGH/
+    └── LOW/
+```
 
-#### Usage
+- **Auto-match** - adding `x_HIGH` to one column also adds its `x_LOW` twin to the other
+- **Presets** - save/load prompt + both LoRA stacks, grouped into lists
+  (stored in `ComfyUI/user/hermes_presets/wan_lora_presets.json`)
+- **Wildcards** in the prompt:
+  - `{option1|option2|option3}` - random choice
+  - `__filename__` - random line from `ComfyUI/user/wildcards/filename.txt`
+  - `<random:0.5:1.0>` - random float in range
 
-1. Add **"WAN Dual LoRA Loader"** node (category: `loaders`)
-2. Connect your WAN HIGH and LOW models
-3. Select folder type (I2V or T2V)
-4. Click **"+ Add"** to add LoRAs to each column
-5. Use the preset system to save/load configurations
-6. Enter your prompt (supports wildcards)
-
-#### Wildcard Syntax
-
-- `{option1|option2|option3}` - Random choice from options
-- `__filename__` - Random line from `wildcards/filename.txt`
-- `<random:0.5:1.0>` - Random float in range
-
-#### Outputs
-
-| Output | Description |
-|--------|-------------|
-| `model_high` | HIGH model with LoRAs applied |
-| `model_low` | LOW model with LoRAs applied |
-| `prompt` | Processed prompt with resolved wildcards |
-
----
+Outputs: `model_high`, `model_low`, `prompt` (wildcards resolved).
 
 ## License
 
-MIT License
+MIT

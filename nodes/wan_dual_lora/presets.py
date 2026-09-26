@@ -1,137 +1,96 @@
 """
 Preset storage for WAN Dual LoRA Loader.
-Stores prompt + LoRA configurations as named presets organized into lists.
+Stores prompt + LoRA configurations as named presets organized into lists,
+in <ComfyUI user dir>/hermes_presets/wan_lora_presets.json.
 """
 
-import os
 import json
+import logging
+import os
+import threading
+
 import folder_paths
 
-# Storage location
+logger = logging.getLogger(__name__)
+
+DEFAULT_LISTS = ("Default", "I2V", "T2V")
+
+
 def get_presets_path():
-    """Get path to presets JSON file in ComfyUI user directory."""
-    user_dir = folder_paths.get_user_directory()
-    presets_dir = os.path.join(user_dir, "hermes_presets")
+    presets_dir = os.path.join(folder_paths.get_user_directory(), "hermes_presets")
     os.makedirs(presets_dir, exist_ok=True)
     return os.path.join(presets_dir, "wan_lora_presets.json")
 
 
-def get_default_data():
-    """Return default empty data structure."""
-    return {
-        "version": "1.0",
-        "lists": {
-            "Default": {},
-            "I2V": {},
-            "T2V": {}
-        }
-    }
+def _default_data():
+    return {"version": "1.0", "lists": {name: {} for name in DEFAULT_LISTS}}
 
 
 class PresetManager:
-    """Manages preset storage and retrieval."""
-
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+    """Loads presets once and writes the whole file back after every change."""
 
     def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-        self.data = None
-        self.load_data()
+        self._lock = threading.Lock()
+        self.data = self._load()
 
-    def load_data(self):
-        """Load presets from JSON file."""
+    def _load(self):
         path = get_presets_path()
-        if os.path.exists(path):
+        if not os.path.exists(path):
+            data = _default_data()
             try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    self.data = json.load(f)
-                # Ensure structure is valid
-                if "lists" not in self.data:
-                    self.data = get_default_data()
-                else:
-                    # Ensure default lists exist (migration for existing users)
-                    changed = False
-                    for list_name in ["Default", "I2V", "T2V"]:
-                        if list_name not in self.data["lists"]:
-                            self.data["lists"][list_name] = {}
-                            changed = True
-                    if changed:
-                        self.save_data()
-            except (json.JSONDecodeError, IOError):
-                self.data = get_default_data()
-        else:
-            self.data = get_default_data()
-            self.save_data()
-
-    def save_data(self):
-        """Save presets to JSON file."""
-        path = get_presets_path()
+                self._write(data)
+            except OSError:
+                pass  # already logged; presets still work in memory
+            return data
         try:
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, indent=2, ensure_ascii=False)
-        except IOError as e:
-            print(f"[Hermes] Failed to save presets: {e}")
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            backup = path + ".broken"
+            try:
+                os.replace(path, backup)  # keep the unreadable file instead of overwriting it on next save
+            except OSError:
+                backup = "(backup failed)"
+            logger.error("[Hermes] Could not read presets from %s (%s); moved it to %s and started fresh",
+                         path, e, backup)
+            return _default_data()
+        if not isinstance(data, dict) or not isinstance(data.get("lists"), dict) or not data["lists"]:
+            return _default_data()
+        return data
 
-    def get_lists(self):
-        """Get all list names."""
-        return list(self.data["lists"].keys())
+    @staticmethod
+    def _write(data):
+        """Raises OSError so callers (and the UI) learn that a change was not persisted."""
+        path = get_presets_path()
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, path)  # atomic: a crash mid-write never truncates the presets
+        except OSError as e:
+            logger.error("[Hermes] Failed to save presets to %s: %s", path, e)
+            raise
 
-    def get_presets_in_list(self, list_name):
-        """Get all preset names in a list."""
-        if list_name in self.data["lists"]:
-            return list(self.data["lists"][list_name].keys())
-        return []
-
-    def get_preset(self, list_name, preset_name):
-        """Get a specific preset."""
-        if list_name in self.data["lists"]:
-            return self.data["lists"][list_name].get(preset_name)
-        return None
-
-    def save_preset(self, list_name, preset_name, preset_data):
-        """Save a preset to a list."""
-        if list_name not in self.data["lists"]:
-            self.data["lists"][list_name] = {}
-        self.data["lists"][list_name][preset_name] = preset_data
-        self.save_data()
-
-    def delete_preset(self, list_name, preset_name):
-        """Delete a preset from a list."""
-        if list_name in self.data["lists"]:
-            if preset_name in self.data["lists"][list_name]:
-                del self.data["lists"][list_name][preset_name]
-                self.save_data()
-                return True
-        return False
-
-    def add_list(self, list_name):
-        """Add a new list."""
-        if list_name not in self.data["lists"]:
-            self.data["lists"][list_name] = {}
-            self.save_data()
-            return True
-        return False
-
-    def delete_list(self, list_name):
-        """Delete a list (if not the last one)."""
-        if list_name in self.data["lists"] and len(self.data["lists"]) > 1:
-            del self.data["lists"][list_name]
-            self.save_data()
-            return True
-        return False
-
-    def get_all_data(self):
-        """Get all data for UI sync."""
+    @property
+    def lists(self):
         return self.data["lists"]
 
+    def get_preset(self, list_name, preset_name):
+        return self.lists.get(list_name, {}).get(preset_name)
 
-# Singleton instance
+    def save_preset(self, list_name, preset_name, preset_data):
+        with self._lock:
+            self.lists.setdefault(list_name, {})[preset_name] = preset_data
+            self._write(self.data)
+
+    def delete_preset(self, list_name, preset_name):
+        with self._lock:
+            presets = self.lists.get(list_name, {})
+            if preset_name not in presets:
+                return False
+            del presets[preset_name]
+            self._write(self.data)
+            return True
+
+
 preset_manager = PresetManager()
