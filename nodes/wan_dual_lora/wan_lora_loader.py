@@ -1,42 +1,36 @@
 """
 WAN Dual LoRA Loader Node
-Loads and applies LoRAs to HIGH and LOW WAN models independently
+Loads and applies LoRAs to HIGH and LOW WAN models independently.
 """
 
 import logging
-import time
-from typing import Union
 
-import folder_paths
-import comfy.utils
 import comfy.sd
+import comfy.utils
 
+from .lora_paths import resolve_lora_path
 from .wildcards import process_wildcards
 
-# Logger
 logger = logging.getLogger(__name__)
 
 
 class AnyType(str):
-    """A special class that is always equal in not equal comparisons."""
+    """A type string that matches any other type in ComfyUI's link validation."""
 
     def __ne__(self, __value: object) -> bool:
         return False
 
 
 class FlexibleOptionalInputType(dict):
-    """A special class to make flexible nodes that accept dynamic inputs."""
+    """Optional-inputs dict that accepts any key, so the front end can add LoRA rows dynamically."""
 
-    def __init__(self, type, data: Union[dict, None] = None):
+    def __init__(self, type, data=None):
+        super().__init__(data or {})
         self.type = type
-        self.data = data
-        if self.data is not None:
-            for k, v in self.data.items():
-                self[k] = v
 
     def __getitem__(self, key):
-        if self.data is not None and key in self.data:
-            return self.data[key]
+        if key in self.keys():
+            return super().__getitem__(key)
         return (self.type,)
 
     def __contains__(self, key):
@@ -46,84 +40,32 @@ class FlexibleOptionalInputType(dict):
 any_type = AnyType("*")
 
 
-def get_lora_list(folder_name):
-    """Get list of LoRA files from a folder"""
-    try:
-        return folder_paths.get_filename_list(folder_name)
-    except Exception:
-        return []
-
-
-def parse_lora_name(lora_name, model_type):
-    """
-    Parse LoRA name with I2V/T2V prefix and return (actual_name, folder_name).
-    lora_name: e.g., "I2V/my_lora.safetensors" or "T2V/my_lora.safetensors"
-    model_type: 'high' or 'low'
-    """
-    if lora_name.startswith("I2V/"):
-        actual_name = lora_name[4:]
-        folder_name = f"wan_loras_i2v_{model_type}"
-    elif lora_name.startswith("T2V/"):
-        actual_name = lora_name[4:]
-        folder_name = f"wan_loras_t2v_{model_type}"
-    else:
-        # Fallback: try I2V first, then T2V
-        actual_name = lora_name
-        folder_name = f"wan_loras_i2v_{model_type}"
-    return actual_name, folder_name
-
-
-def load_lora_file(lora_name, model_type):
-    """Load a LoRA file and return its state dict"""
-    try:
-        actual_name, folder_name = parse_lora_name(lora_name, model_type)
-        lora_path = folder_paths.get_full_path(folder_name, actual_name)
-
-        # If not found, try the other variant (I2V <-> T2V)
-        if lora_path is None and not lora_name.startswith(("I2V/", "T2V/")):
-            alt_folder = f"wan_loras_t2v_{model_type}"
-            lora_path = folder_paths.get_full_path(alt_folder, actual_name)
-            if lora_path:
-                folder_name = alt_folder
-
-        # If still not found, try the shared folder
-        if lora_path is None:
-            if lora_name.startswith("I2V/"):
-                shared_folder = "wan_loras_i2v_shared"
-            elif lora_name.startswith("T2V/"):
-                shared_folder = "wan_loras_t2v_shared"
-            else:
-                shared_folder = "wan_loras_i2v_shared"  # Default to I2V
-            lora_path = folder_paths.get_full_path(shared_folder, actual_name)
-
-            # Try T2V shared if I2V shared didn't work
-            if lora_path is None and not lora_name.startswith(("I2V/", "T2V/")):
-                lora_path = folder_paths.get_full_path("wan_loras_t2v_shared", actual_name)
-
-        if lora_path is None:
-            logger.warning(f"LoRA file not found: {lora_name} in {folder_name}")
-            return None
-        return comfy.utils.load_torch_file(lora_path, safe_load=True)
-    except Exception as e:
-        logger.error(f"Error loading LoRA {lora_name}: {e}")
-        return None
+def _enabled_loras(kwargs, prefix):
+    """Yield (name, strength) for every enabled, non-zero LoRA row whose input key starts with prefix."""
+    for key, value in kwargs.items():
+        if not key.upper().startswith(prefix):
+            continue
+        if not (isinstance(value, dict) and {"on", "lora", "strength"} <= value.keys()):
+            continue
+        if value["on"] and value["lora"] and value["strength"] != 0:
+            yield value["lora"], value["strength"]
 
 
 class WANDualLoraLoader:
     """
-    WAN Dual LoRA Loader - Loads LoRAs for both HIGH and LOW WAN models
-    with integrated wildcard prompt processing.
+    Loads LoRAs for both HIGH and LOW WAN 2.2 models, with integrated wildcard prompt processing.
+    LoRA rows are added by the front end as dynamic optional inputs: HIGH_LORA_n / LOW_LORA_n,
+    each a dict {"on": bool, "lora": "<I2V|T2V>/<file>", "strength": float}.
     """
 
-    NAME = "WAN Dual LoRA Loader"
     CATEGORY = "loaders/wan"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_high": ("MODEL", {"tooltip": "The HIGH diffusion model"}),
-                "model_low": ("MODEL", {"tooltip": "The LOW diffusion model"}),
+                "model_high": ("MODEL", {"tooltip": "The HIGH noise diffusion model"}),
+                "model_low": ("MODEL", {"tooltip": "The LOW noise diffusion model"}),
                 "prompt": ("STRING", {
                     "multiline": True,
                     "default": "",
@@ -137,66 +79,29 @@ class WANDualLoraLoader:
                 }),
             },
             "optional": FlexibleOptionalInputType(type=any_type),
-            "hidden": {
-                "unique_id": "UNIQUE_ID",
-            }
         }
 
     RETURN_TYPES = ("MODEL", "MODEL", "STRING")
     RETURN_NAMES = ("model_high", "model_low", "prompt")
+    OUTPUT_TOOLTIPS = ("HIGH model with its LoRAs applied.", "LOW model with its LoRAs applied.",
+                       "Prompt with wildcards resolved.")
     FUNCTION = "load_loras"
+    DESCRIPTION = "Applies separate LoRA stacks to the WAN 2.2 HIGH and LOW noise models, with presets and wildcard prompts."
+
+    @staticmethod
+    def _apply(model, loras, model_type):
+        for name, strength in loras:
+            path = resolve_lora_path(name, model_type)
+            if path is None:
+                logger.warning("[Hermes] %s LoRA not found, skipped: %s", model_type.upper(), name)
+                continue
+            lora = comfy.utils.load_torch_file(path, safe_load=True)
+            model, _ = comfy.sd.load_lora_for_models(model, None, lora, strength, 0)
+            logger.debug("[Hermes] Applied %s LoRA %s (strength %s)", model_type.upper(), name, strength)
+        return model
 
     def load_loras(self, model_high, model_low, prompt="", seed=0, **kwargs):
-        """
-        Process HIGH and LOW LoRAs and apply them to respective models.
-        Also processes wildcards in the prompt.
-        """
-        total_start = time.time()
-        print(f"\n[TIMING] ===== WANDualLoraLoader START =====")
-
-        high_loras_applied = 0
-        low_loras_applied = 0
-
-        for key, value in kwargs.items():
-            key_upper = key.upper()
-
-            # Process HIGH LoRAs
-            if key_upper.startswith('HIGH_LORA_'):
-                if isinstance(value, dict) and 'on' in value and 'lora' in value and 'strength' in value:
-                    if value['on'] and value['strength'] != 0 and value['lora']:
-                        t0 = time.time()
-                        lora = load_lora_file(value['lora'], 'high')
-                        if lora is not None:
-                            model_high, _ = comfy.sd.load_lora_for_models(
-                                model_high, None, lora, value['strength'], 0
-                            )
-                            high_loras_applied += 1
-                            print(f"[TIMING] HIGH LoRA '{value['lora']}' (str={value['strength']}): {time.time() - t0:.2f}s")
-
-            # Process LOW LoRAs
-            elif key_upper.startswith('LOW_LORA_'):
-                if isinstance(value, dict) and 'on' in value and 'lora' in value and 'strength' in value:
-                    if value['on'] and value['strength'] != 0 and value['lora']:
-                        t0 = time.time()
-                        lora = load_lora_file(value['lora'], 'low')
-                        if lora is not None:
-                            model_low, _ = comfy.sd.load_lora_for_models(
-                                model_low, None, lora, value['strength'], 0
-                            )
-                            low_loras_applied += 1
-                            print(f"[TIMING] LOW LoRA '{value['lora']}' (str={value['strength']}): {time.time() - t0:.2f}s")
-
-        # Process wildcards in prompt
+        model_high = self._apply(model_high, _enabled_loras(kwargs, "HIGH_LORA_"), "high")
+        model_low = self._apply(model_low, _enabled_loras(kwargs, "LOW_LORA_"), "low")
         processed_prompt = process_wildcards(prompt, seed) if prompt else ""
-
-        print(f"[TIMING] ===== WANDualLoraLoader TOTAL: {time.time() - total_start:.2f}s (HIGH: {high_loras_applied}, LOW: {low_loras_applied}) =====\n")
-
         return (model_high, model_low, processed_prompt)
-
-    @classmethod
-    def get_lora_lists(cls):
-        """Get available LoRA lists for HIGH and LOW"""
-        return {
-            'high': get_lora_list('wan_loras_high'),
-            'low': get_lora_list('wan_loras_low')
-        }

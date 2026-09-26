@@ -18,17 +18,26 @@ def get_wildcard_path():
     return wildcard_path
 
 
+def _is_within(root, path):
+    """True if `path` resolves inside `root` (blocks __../../file__ escapes)."""
+    root = os.path.realpath(root)
+    try:
+        return os.path.commonpath([root, os.path.realpath(path)]) == root
+    except ValueError:  # different drives on Windows
+        return False
+
+
 def process_choice_syntax(text, seed):
     """
     Process {option1|option2|option3} syntax
     Randomly selects one option from the pipe-separated list
     """
-    random.seed(seed)
+    rng = random.Random(seed)
     pattern = re.compile(r'{([^{}]*)}')
 
     def replace(m):
         parts = m.group(1).split('|')
-        return random.choice(parts)
+        return rng.choice(parts)
 
     # Process recursively to handle nested choices
     while pattern.search(text):
@@ -42,13 +51,13 @@ def process_random_syntax(text, seed):
     Process <random:min:max> syntax
     Generates a random float between min and max
     """
-    random.seed(seed)
+    rng = random.Random(seed)
     pattern = r'<random:(-?\d*\.?\d+):(-?\d*\.?\d+)>'
 
     def replace(m):
         min_val = float(m.group(1))
         max_val = float(m.group(2))
-        random_value = random.uniform(min_val, max_val)
+        random_value = rng.uniform(min_val, max_val)
         return str(round(random_value, 4))
 
     text = re.sub(pattern, replace, text)
@@ -71,7 +80,7 @@ def process_file_wildcards(text, seed):
     # Regex pattern for wildcard syntax
     wildcard_regex = r'((\d+)\$\$)?__(!|\+|-|\*)?((?:[^|_]+_)*[^|_]+)((?:\|[^|]+)*)__'
 
-    random.seed(seed)
+    rng = random.Random(seed)
     offset = seed
     match_strings = []
 
@@ -111,7 +120,7 @@ def process_file_wildcards(text, seed):
         if not os.path.isfile(file_path) and wildcard_dir == '':
             file_path = os.path.join(wildcard_path, wildcard_file + '.txt')
 
-        if os.path.isfile(file_path):
+        if _is_within(wildcard_path, file_path) and os.path.isfile(file_path):
             store_offset = None
 
             # Handle offset modifiers for repeated wildcards
@@ -120,13 +129,13 @@ def process_file_wildcards(text, seed):
                 if lock_indicator:
                     offset = seed
                 elif random_indicator:
-                    offset = random.randint(0, 1000000)
+                    offset = rng.randint(0, 1000000)
                 elif increment_indicator:
                     offset = seed + 1
                 elif decrement_indicator:
                     offset = seed - 1
                 else:
-                    offset = random.randint(0, 1000000)
+                    offset = rng.randint(0, 1000000)
 
             selected_lines = []
             with open(file_path, 'r', encoding='utf-8') as file:
