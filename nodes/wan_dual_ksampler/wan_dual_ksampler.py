@@ -4,6 +4,7 @@ Sample with the HIGH noise model first, then the LOW noise model (WAN 2.2 MoE ar
 """
 
 import gc
+import inspect
 import logging
 import time
 
@@ -16,6 +17,11 @@ import latent_preview
 
 logger = logging.getLogger(__name__)
 
+_prepare_empty_noise = getattr(comfy.sample, "prepare_empty_noise", None)
+_FIX_CHANNELS_TAKES_RATIOS = (
+    "downscale_ratio_spacial" in inspect.signature(comfy.sample.fix_empty_latent_channels).parameters
+)
+
 
 def _free_vram():
     comfy.model_management.unload_all_models()
@@ -23,29 +29,56 @@ def _free_vram():
     comfy.model_management.soft_empty_cache(force=True)
 
 
-def _run_phase(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent,
-               denoise, start_step, last_step, noise_mask, batch_inds, first):
-    """One KSamplerAdvanced-style pass over [start_step, last_step).
+def _empty_noise(samples):
+    """Zero noise for a phase that continues an already noised latent; nested-latent aware where core is."""
+    if _prepare_empty_noise is not None:
+        return _prepare_empty_noise(samples)
+    return torch.zeros(samples.size(), dtype=samples.dtype, layout=samples.layout, device="cpu")
 
-    The first phase adds noise and leaves the result noisy for the second one; the second
-    phase continues from that latent with noise disabled and fully denoises.
+
+def _fix_channels(model, samples, latent_image):
+    if _FIX_CHANNELS_TAKES_RATIOS:
+        return comfy.sample.fix_empty_latent_channels(
+            model, samples, latent_image.get("downscale_ratio_spacial"), latent_image.get("downscale_ratio_temporal")
+        )
+    return comfy.sample.fix_empty_latent_channels(model, samples)
+
+
+def _phase_plan(steps, switch_step):
+    """[("high" | "low", first_step, last_step)] for a HIGH -> LOW run; either phase may be empty.
+
+    The phase that starts at step 0 adds the noise and the one that ends at `steps` denoises
+    fully; a phase that ends earlier hands its leftover noise on, as KSamplerAdvanced does.
     """
+    switch_step = max(0, min(switch_step, steps))
+    plan = []
+    if switch_step > 0:
+        plan.append(("high", 0, switch_step))
+    if switch_step < steps:
+        plan.append(("low", switch_step, steps))
+    return plan
+
+
+def _run_phase(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, samples,
+               denoise, start_step, last_step, latent_image):
+    """One KSamplerAdvanced-style pass over [start_step, last_step)."""
+    add_noise = start_step == 0
     # fix channels before preparing noise, so the noise matches the model (as KSamplerAdvanced does)
-    latent = comfy.sample.fix_empty_latent_channels(model, latent)
-    if first:
-        noise = comfy.sample.prepare_noise(latent, seed, batch_inds)
+    samples = _fix_channels(model, samples, latent_image)
+    if add_noise:
+        noise = comfy.sample.prepare_noise(samples, seed, latent_image.get("batch_index"))
     else:
-        noise = torch.zeros(latent.size(), dtype=latent.dtype, layout=latent.layout, device="cpu")
+        noise = _empty_noise(samples)
 
     return comfy.sample.sample(
         model, noise, steps, cfg, sampler_name, scheduler,
-        positive, negative, latent,
+        positive, negative, samples,
         denoise=denoise,
-        disable_noise=not first,
+        disable_noise=not add_noise,
         start_step=start_step,
         last_step=last_step,
-        force_full_denoise=not first,
-        noise_mask=noise_mask,
+        force_full_denoise=last_step >= steps,
+        noise_mask=latent_image.get("noise_mask"),
         callback=latent_preview.prepare_callback(model, steps),
         disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
         seed=seed,
@@ -55,31 +88,26 @@ def _run_phase(model, seed, steps, cfg, sampler_name, scheduler, positive, negat
 def _dual_sample(model_high, model_low, seed, steps, switch_step, high_cfg, low_cfg, sampler_name,
                  scheduler, positive, negative, latent_image, denoise, between_phases=None):
     """HIGH model for steps [0, switch_step), LOW model for [switch_step, steps)."""
-    noise_mask = latent_image.get("noise_mask")
-    batch_inds = latent_image.get("batch_index")
-    common = dict(seed=seed, steps=steps, sampler_name=sampler_name, scheduler=scheduler,
-                  positive=positive, negative=negative, denoise=denoise,
-                  noise_mask=noise_mask, batch_inds=batch_inds)
-
-    t0 = time.perf_counter()
-    samples = _run_phase(model_high, cfg=high_cfg, latent=latent_image["samples"],
-                         start_step=0, last_step=switch_step, first=True, **common)
-    high_time = time.perf_counter() - t0
-
-    if between_phases is not None:
-        between_phases()
-
-    low_time = 0.0
-    if switch_step < steps:
+    phases = {"high": (model_high, high_cfg), "low": (model_low, low_cfg)}
+    samples = latent_image["samples"]
+    step_counts = {"high": 0, "low": 0}
+    seconds = {"high": 0.0, "low": 0.0}
+    for i, (which, start, last) in enumerate(_phase_plan(steps, switch_step)):
+        if i > 0 and between_phases is not None:
+            between_phases()
+        model, cfg = phases[which]
         t0 = time.perf_counter()
-        samples = _run_phase(model_low, cfg=low_cfg, latent=samples,
-                             start_step=switch_step, last_step=steps, first=False, **common)
-        low_time = time.perf_counter() - t0
+        samples = _run_phase(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                             samples, denoise, start, last, latent_image)
+        seconds[which] = time.perf_counter() - t0
+        step_counts[which] = last - start
 
     logger.info("[Hermes] WAN Dual KSampler: HIGH %d steps %.1fs, LOW %d steps %.1fs",
-                switch_step, high_time, steps - switch_step, low_time)
+                step_counts["high"], seconds["high"], step_counts["low"], seconds["low"])
 
     out = latent_image.copy()
+    out.pop("downscale_ratio_spacial", None)
+    out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
     return (out,)
 
@@ -118,7 +146,7 @@ class WANDualKSampler:
     def sample(self, model_high, model_low, seed, steps, switch_step, first_cfg, second_cfg, sampler_name,
                scheduler, positive, negative, latent_image, denoise=1.0, offload_between_phases=False):
         result = _dual_sample(
-            model_high, model_low, seed, steps, min(switch_step, steps), first_cfg, second_cfg,
+            model_high, model_low, seed, steps, switch_step, first_cfg, second_cfg,
             sampler_name, scheduler, positive, negative, latent_image, denoise,
             between_phases=_free_vram if offload_between_phases else comfy.model_management.soft_empty_cache,
         )
@@ -161,18 +189,23 @@ class WANDualKSamplerBeta:
     DESCRIPTION = "Boundary-based Dual KSampler for WAN 2.2 MoE: switches from HIGH to LOW model based on timestep boundary."
 
     @staticmethod
-    def _switch_step(model, scheduler, steps, boundary):
-        """First step whose timestep (0..1) falls below the boundary; `steps` if none does."""
+    def _switch_step(model, sampler_name, scheduler, steps, boundary, denoise=1.0):
+        """First step that starts at a timestep (0..1) below the boundary: `steps` if none does, 0 if all do.
+
+        Read off the schedule the run will actually use, KSampler's own: the denoise tail, and the
+        discarded penultimate sigma of dpm_2 and uni_pc, both move the crossing.
+        """
         sampling = model.get_model_object("model_sampling")
-        sigmas = comfy.samplers.calculate_sigmas(sampling, scheduler, steps)
-        for i, sigma in enumerate(sigmas.tolist()[1:], start=1):
-            if sampling.timestep(sigma) / 1000 < boundary:
+        sigmas = comfy.samplers.KSampler(model, steps=steps, device="cpu", sampler=sampler_name,
+                                         scheduler=scheduler, denoise=denoise).sigmas
+        for i, sigma in enumerate(sigmas[:-1]):
+            if float(sampling.timestep(sigma)) / 1000 < boundary:
                 return i
         return steps
 
     def sample(self, model_high, model_low, seed, steps, boundary, cfg, sampler_name, scheduler,
                positive, negative, latent_image, denoise=1.0):
-        switch_step = self._switch_step(model_high, scheduler, steps, boundary)
+        switch_step = self._switch_step(model_high, sampler_name, scheduler, steps, boundary, denoise)
         logger.info("[Hermes] WAN Dual KSampler (Boundary): boundary=%s -> switching at step %d/%d",
                     boundary, switch_step, steps)
         return _dual_sample(model_high, model_low, seed, steps, switch_step, cfg, cfg, sampler_name,
