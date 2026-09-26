@@ -1,3 +1,4 @@
+import hashlib
 import os
 import random
 import re
@@ -39,6 +40,18 @@ def list_images(folder_path, recursive):
     return sorted(files)
 
 
+def listing_fingerprint(files):
+    """Digest of names, sizes and mtimes: the cache key behind "same folder contents"."""
+    digest = hashlib.sha1()
+    for path in files:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        digest.update(f"{path}|{st.st_size}|{st.st_mtime_ns}\n".encode("utf-8", "surrogateescape"))
+    return digest.hexdigest()
+
+
 def save_preview(img):
     """Write a downscaled copy to temp/ so the front end can show it through the standard /view route."""
     preview = img.copy()
@@ -66,6 +79,15 @@ class RandomImageLoader:
     FUNCTION = "load_random"
     CATEGORY = "hermes/image"
     DESCRIPTION = "Loads a seeded random image from a folder (png, jpg, webp, bmp, tiff)."
+
+    @classmethod
+    def IS_CHANGED(cls, folder_path, seed, recursive):
+        if not isinstance(folder_path, str) or not isinstance(recursive, bool):
+            return float("nan")
+        folder_path = normalize_folder(folder_path)
+        if not os.path.isdir(folder_path):
+            return ""
+        return listing_fingerprint(list_images(folder_path, recursive))
 
     def load_random(self, folder_path, seed, recursive):
         folder_path = normalize_folder(folder_path)
