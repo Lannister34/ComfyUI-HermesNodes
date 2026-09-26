@@ -14,3 +14,10 @@ Repository = "https://github.com/Lannister34/ComfyUI-HermesNodes"
 PublisherId = "lannister34"
 DisplayName = "Hermes Nodes"
 Icon = ""
+
+[tool.pytest.ini_options]
+# The package root has an __init__.py, so pytest would treat the repo as a test package and import
+# that file as a bare module named "__init__" (the folder name is not an identifier). Cutting the
+# collection tree at tests/ keeps the node pack out of it; conftest.py imports it properly.
+addopts = "--confcutdir=tests -p no:cacheprovider"
+testpaths = ["tests"]
