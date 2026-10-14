@@ -3,3 +3,7 @@ __pycache__/
 *.pyo
 .DS_Store
 *.zip
+
+# devkit:review:start
+.claude/.review-state
+# devkit:review:end
