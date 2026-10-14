@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# cmd.exe requires CRLF: an LF-only .bat breaks goto/labels
+*.bat text eol=crlf

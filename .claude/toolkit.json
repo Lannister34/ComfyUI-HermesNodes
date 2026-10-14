@@ -1,0 +1,18 @@
+{
+  "toolkit": "devkit",
+  "version": "0.1.8",
+  "installed": {
+    "core": "0.1.8",
+    "design": "0.1.8",
+    "review": "0.1.8",
+    "git": "0.1.8"
+  },
+  "resolutions": {
+    "commit-convention": "merge"
+  },
+  "vars": {
+    "commitPattern": "^((feat|fix|chore|docs|test|style|refactor|perf|build|ci)(\\(.+\\))?!?: .+|Merge (branch|remote-tracking branch|pull request) .+|[A-Z][A-Za-z0-9].*[^.])$",
+    "commitConvention": "Capitalized imperative subject (`Add preset validation`, `Fix wildcard parsing`), optionally with a Conventional Commits type prefix (`feat(wan): ...`, `fix:`); git's default merge messages pass."
+  },
+  "updatedAt": "2026-09-26T09:03:26.576Z"
+}

@@ -1,5 +1,8 @@
+import hashlib
 import os
 import random
+import re
+import sys
 import uuid
 
 import numpy as np
@@ -10,6 +13,15 @@ import folder_paths
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
 PREVIEW_MAX_SIDE = 1024
+_BARE_DRIVE = re.compile(r"^[A-Za-z]:$")
+
+
+def normalize_folder(path):
+    """Strip the path; on Windows a bare "D:" is the drive root, not the drive's current directory."""
+    path = path.strip()
+    if sys.platform == "win32" and _BARE_DRIVE.match(path):
+        return path + "\\"
+    return path
 
 
 def list_images(folder_path, recursive):
@@ -26,6 +38,18 @@ def list_images(folder_path, recursive):
             if entry.is_file() and os.path.splitext(entry.name)[1].lower() in SUPPORTED_EXTENSIONS
         ]
     return sorted(files)
+
+
+def listing_fingerprint(files):
+    """Digest of names, sizes and mtimes: the cache key behind "same folder contents"."""
+    digest = hashlib.sha1()
+    for path in files:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        digest.update(f"{path}|{st.st_size}|{st.st_mtime_ns}\n".encode("utf-8", "surrogateescape"))
+    return digest.hexdigest()
 
 
 def save_preview(img):
@@ -56,8 +80,17 @@ class RandomImageLoader:
     CATEGORY = "hermes/image"
     DESCRIPTION = "Loads a seeded random image from a folder (png, jpg, webp, bmp, tiff)."
 
+    @classmethod
+    def IS_CHANGED(cls, folder_path, seed, recursive):
+        if not isinstance(folder_path, str) or not isinstance(recursive, bool):
+            return float("nan")
+        folder_path = normalize_folder(folder_path)
+        if not os.path.isdir(folder_path):
+            return ""
+        return listing_fingerprint(list_images(folder_path, recursive))
+
     def load_random(self, folder_path, seed, recursive):
-        folder_path = folder_path.strip()
+        folder_path = normalize_folder(folder_path)
         if not os.path.isdir(folder_path):
             raise ValueError(f"Random Image Loader: folder not found: {folder_path!r}")
 

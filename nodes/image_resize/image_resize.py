@@ -1,4 +1,5 @@
 import math
+from fractions import Fraction
 
 import torch.nn.functional as F
 import comfy.utils
@@ -28,12 +29,12 @@ class ImageResize:
     @staticmethod
     def _target_size(w, h, size, mode, multiple_of):
         # smallest: the shorter side reaches size, rounding up; largest: the longer side fits, rounding down
-        aspect = w / h  # keep this exact form: ceil/floor at a multiple boundary is float-sensitive
+        aspect = Fraction(w, h)
         rounding = math.ceil if mode == "smallest" else math.floor
         width_leads = (w <= h) if mode == "smallest" else (w >= h)
 
         def snap(value):
-            return rounding(value / multiple_of) * multiple_of
+            return rounding(Fraction(value) / multiple_of) * multiple_of
 
         if width_leads:
             new_w = snap(size)

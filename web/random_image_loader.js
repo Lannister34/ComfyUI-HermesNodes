@@ -303,7 +303,9 @@ async function openFolderPicker(node, folderWidget) {
                 parentItem.onmouseenter = () => parentItem.style.background = "#333";
                 parentItem.onmouseleave = () => parentItem.style.background = "none";
                 parentItem.onclick = () => {
-                    const parent = activePath.replace(/[/\\][^/\\]*$/, "") || "";
+                    const trimmed = activePath.replace(/[/\\]+$/, "");
+                    let parent = /^[A-Za-z]:$/.test(trimmed) ? "" : trimmed.replace(/[/\\][^/\\]*$/, "");
+                    if (/^[A-Za-z]:$/.test(parent)) parent += "\\";
                     loadFolder(parent);
                 };
                 listContainer.appendChild(parentItem);

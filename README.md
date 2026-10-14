@@ -28,6 +28,7 @@ No extra Python dependencies - everything used ships with ComfyUI.
 | Video Preview | `hermes/video` | Encode frames (+ audio) to mp4 and play in the node: autoplay, sound on hover, click to pause |
 | Video Player | `hermes/video` | Same encoding, native player controls for scrubbing |
 | Video Compare (Side-by-Side) | `hermes/video` | Tile up to 6 videos into one grid clip for A/B comparisons |
+| Load Video (Resampled) | `hermes/video` | Load a video at a fixed frame rate with its soundtrack cut to the same span; files without sound give silence |
 
 Node ids (for API-format workflows): `WANDualLoraLoader`, `WANDualKSampler`, `WANDualKSamplerBeta`,
 and `Hermes` + the node name for the rest (`HermesImageResize`, `HermesVideoPreview`, ...).

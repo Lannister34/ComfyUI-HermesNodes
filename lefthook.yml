@@ -1,0 +1,9 @@
+# devkit:git:start
+# Activate once with: lefthook install
+commit-msg:
+  commands:
+    conventional:
+      # Sole gate: grep's exit code. Subshells and quoted echo break under lefthook's Windows spawn.
+      run: >-
+        head -1 {1} | grep -Eq '^((feat|fix|chore|docs|test|style|refactor|perf|build|ci)(\(.+\))?!?: .+|Merge (branch|remote-tracking branch|pull request) .+|[A-Z][A-Za-z0-9].*[^.])$'
+# devkit:git:end

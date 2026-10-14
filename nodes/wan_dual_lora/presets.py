@@ -4,6 +4,7 @@ Stores prompt + LoRA configurations as named presets organized into lists,
 in <ComfyUI user dir>/hermes_presets/wan_lora_presets.json.
 """
 
+import copy
 import json
 import logging
 import os
@@ -78,19 +79,30 @@ class PresetManager:
     def get_preset(self, list_name, preset_name):
         return self.lists.get(list_name, {}).get(preset_name)
 
-    def save_preset(self, list_name, preset_name, preset_data):
+    def _commit(self, mutate):
+        """Apply `mutate(lists)` to a copy; when it reports a change, persist that copy, then publish it.
+
+        A failed write changes nothing, and a no-op never touches the disk."""
         with self._lock:
-            self.lists.setdefault(list_name, {})[preset_name] = preset_data
-            self._write(self.data)
+            candidate = copy.deepcopy(self.data)
+            changed = mutate(candidate["lists"])
+            if changed:
+                self._write(candidate)
+                self.data = candidate
+            return changed
+
+    def save_preset(self, list_name, preset_name, preset_data):
+        def mutate(lists):
+            lists.setdefault(list_name, {})[preset_name] = preset_data
+            return True
+
+        self._commit(mutate)
 
     def delete_preset(self, list_name, preset_name):
-        with self._lock:
-            presets = self.lists.get(list_name, {})
-            if preset_name not in presets:
-                return False
-            del presets[preset_name]
-            self._write(self.data)
-            return True
+        def mutate(lists):
+            return lists.get(list_name, {}).pop(preset_name, None) is not None
+
+        return self._commit(mutate)
 
 
 preset_manager = PresetManager()
