@@ -10,6 +10,7 @@ from .random_image_loader import RandomImageLoader
 from .video_preview import VideoPreview
 from .video_player import VideoPlayer
 from .video_compare import VideoCompare
+from .video_loader import LoadVideo
 
 NODE_CLASS_MAPPINGS = {
     # WAN 2.2
@@ -24,6 +25,7 @@ NODE_CLASS_MAPPINGS = {
     "HermesVideoPreview": VideoPreview,
     "HermesVideoPlayer": VideoPlayer,
     "HermesVideoCompare": VideoCompare,
+    "HermesLoadVideo": LoadVideo,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -36,4 +38,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HermesVideoPreview": "Video Preview",
     "HermesVideoPlayer": "Video Player",
     "HermesVideoCompare": "Video Compare (Side-by-Side)",
+    "HermesLoadVideo": "Load Video (Resampled)",
 }
