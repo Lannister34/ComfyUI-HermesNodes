@@ -13,10 +13,71 @@ const HEADER_HEIGHT = 24;
 const BUTTON_HEIGHT = 24;
 const PRESET_SECTION_HEIGHT = 94;
 
+// ---- Shared state: one server listener and one fetch per session, not one per node ----
+
+// Loader nodes currently in a graph. Nodes cloned for copy/paste run onNodeCreated but are
+// never added, so registering here (onAdded/onRemoved) cannot leak them.
+const liveNodes = new Set();
+
+let loraListsPromise = null;
+function getLoraLists(force = false) {
+    if (force || !loraListsPromise) {
+        loraListsPromise = Promise.all([fetchLoraList("high"), fetchLoraList("low")]);
+    }
+    return loraListsPromise;
+}
+
+let presetsPromise = null;
+function getPresetLists(force = false) {
+    if (force || !presetsPromise) {
+        presetsPromise = api.fetchApi("/hermes/presets/init", { method: "POST", body: "{}" })
+            .then(resp => (resp.ok ? resp.json() : Promise.reject(new Error(`HTTP ${resp.status}`))))
+            .then(data => data.lists)
+            .catch(e => {
+                console.warn("Failed to fetch presets:", e);
+                presetsPromise = null;
+                return null;
+            });
+    }
+    return presetsPromise;
+}
+
+api.addEventListener("hermes-presets-update", (event) => {
+    const lists = event.detail?.lists;
+    if (!lists) return;
+    presetsPromise = Promise.resolve(lists);
+    for (const node of liveNodes) node.applyPresetLists(lists);
+});
+
+// Changes made from menus, prompts or async responses happen after the change tracker took its
+// mouseup/keydown snapshot; record them explicitly so undo and the "modified" marker see them.
+function markWorkflowChanged() {
+    const tracker = app.extensionManager?.workflow?.activeWorkflow?.changeTracker;
+    (tracker?.captureCanvasState ?? tracker?.checkState)?.call(tracker);
+}
+
+// Rows come from saved workflows and presets that may be hand-edited: never trust their shape
+function normalizeLora(row) {
+    const strength = Number(row?.strength);
+    return {
+        on: row?.on !== false,
+        lora: typeof row?.lora === "string" && row.lora ? row.lora : null,
+        strength: Number.isFinite(strength) ? strength : 1.0,
+    };
+}
+
+async function errorText(resp) {
+    try {
+        return (await resp.json()).error || `HTTP ${resp.status}`;
+    } catch {
+        return `HTTP ${resp.status}`;
+    }
+}
+
 // Fetch LoRA list from server
 async function fetchLoraList(type) {
     try {
-        const resp = await api.fetchApi(`/wan_loras/${type}`);
+        const resp = await api.fetchApi(`/hermes/wan_loras/${type}`);
         if (resp.ok) {
             return await resp.json();
         }
@@ -36,66 +97,203 @@ function getLoraDisplayName(loraPath) {
     return name;
 }
 
-// Show LoRA selection menu with I2V/T2V grouped
+// Show LoRA selection menu with filter input + I2V/T2V grouped
 function showLoraMenu(event, loras, callback) {
-    const menu = [];
+    // Close any existing picker
+    document.querySelectorAll(".hermes-lora-picker").forEach(el => el.remove());
 
-    menu.push({
-        content: "None",
-        callback: () => callback(null)
-    });
-
-    if (!loras || loras.length === 0) {
-        menu.push({
-            content: "(No LoRAs in folder)",
-            disabled: true
+    // Build sorted list with subfolder grouping: {display, value, group, subfolder}
+    // Group = I2V/T2V/other, subfolder = top-level folder under group (or "" for root)
+    const buildItems = (filtered, group) => {
+        const entries = filtered.map(l => {
+            const stripped = getLoraDisplayName(l).replace(/\\/g, "/");
+            const slashIdx = stripped.indexOf("/");
+            const subfolder = slashIdx > -1 ? stripped.slice(0, slashIdx) : "";
+            const leaf = slashIdx > -1 ? stripped.slice(slashIdx + 1) : stripped;
+            return { display: leaf, full: stripped, value: l, group, subfolder };
         });
-    } else {
-        // Group by I2V/T2V
-        const i2vLoras = loras.filter(l => l.startsWith("I2V/"));
-        const t2vLoras = loras.filter(l => l.startsWith("T2V/"));
-        const otherLoras = loras.filter(l => !l.startsWith("I2V/") && !l.startsWith("T2V/"));
+        // Sort: items with subfolder first (alphabetically by subfolder, then leaf),
+        // then root-level items (without subfolder) alphabetically.
+        entries.sort((a, b) => {
+            const aHas = a.subfolder ? 0 : 1;
+            const bHas = b.subfolder ? 0 : 1;
+            if (aHas !== bHas) return aHas - bHas;
+            const aKey = (a.subfolder + "/" + a.display).toLowerCase();
+            const bKey = (b.subfolder + "/" + b.display).toLowerCase();
+            return aKey.localeCompare(bKey);
+        });
+        return entries;
+    };
 
-        if (i2vLoras.length > 0) {
-            menu.push({ content: "── I2V ──", disabled: true });
-            for (const lora of i2vLoras) {
-                menu.push({
-                    content: getLoraDisplayName(lora),
-                    callback: () => callback(lora)
-                });
-            }
-        }
-
-        if (t2vLoras.length > 0) {
-            menu.push({ content: "── T2V ──", disabled: true });
-            for (const lora of t2vLoras) {
-                menu.push({
-                    content: getLoraDisplayName(lora),
-                    callback: () => callback(lora)
-                });
-            }
-        }
-
-        if (otherLoras.length > 0) {
-            for (const lora of otherLoras) {
-                menu.push({
-                    content: lora,
-                    callback: () => callback(lora)
-                });
-            }
-        }
+    const items = [{ display: "None", full: "None", value: null, group: null, subfolder: "" }];
+    if (loras && loras.length > 0) {
+        const i2v = loras.filter(l => l.startsWith("I2V/"));
+        const t2v = loras.filter(l => l.startsWith("T2V/"));
+        const other = loras.filter(l => !l.startsWith("I2V/") && !l.startsWith("T2V/"));
+        items.push(...buildItems(i2v, "I2V"));
+        items.push(...buildItems(t2v, "T2V"));
+        items.push(...buildItems(other, null));
     }
 
-    new LiteGraph.ContextMenu(menu, {
-        event: event,
-        title: "Select LoRA"
+    // Root overlay (captures outside clicks)
+    const overlay = document.createElement("div");
+    overlay.className = "hermes-lora-picker";
+    overlay.style.cssText = `
+        position: fixed; inset: 0; z-index: 10000;
+        background: transparent;
+    `;
+
+    // Picker panel
+    const panel = document.createElement("div");
+    panel.style.cssText = `
+        position: absolute; min-width: 280px; max-width: 480px;
+        background: #1f1f1f; border: 1px solid #555; border-radius: 4px;
+        box-shadow: 0 6px 24px rgba(0,0,0,0.5); overflow: hidden;
+        display: flex; flex-direction: column;
+        font-family: sans-serif; font-size: 13px; color: #ddd;
+    `;
+    // Position at click point, clamped to viewport
+    const maxH = Math.min(500, window.innerHeight - 40);
+    let x = event.clientX;
+    let y = event.clientY;
+    if (x + 300 > window.innerWidth) x = window.innerWidth - 310;
+    if (y + maxH > window.innerHeight) y = window.innerHeight - maxH - 10;
+    panel.style.left = `${Math.max(10, x)}px`;
+    panel.style.top = `${Math.max(10, y)}px`;
+    panel.style.maxHeight = `${maxH}px`;
+
+    // Filter input
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Filter list...";
+    input.style.cssText = `
+        width: 100%; padding: 8px 10px; box-sizing: border-box;
+        background: #2a2a2a; color: #fff; border: none;
+        border-bottom: 1px solid #444; outline: none; font-size: 13px;
+    `;
+    panel.appendChild(input);
+
+    // Scrollable list
+    const list = document.createElement("div");
+    list.style.cssText = `
+        overflow-y: auto; flex: 1 1 auto; min-height: 0;
+    `;
+    panel.appendChild(list);
+
+    let selectedIdx = 0;
+    let visibleItems = [];
+
+    const close = () => overlay.remove();
+
+    const choose = (value) => {
+        close();
+        callback(value);
+    };
+
+    const render = (filter) => {
+        list.innerHTML = "";
+        const f = (filter || "").toLowerCase().trim();
+        let lastGroup = undefined;
+        let lastSubfolder = undefined;
+        visibleItems = [];
+        for (const item of items) {
+            const hay = `${item.group || ""} ${item.subfolder || ""} ${item.full} ${item.value || ""}`.toLowerCase();
+            if (f && !hay.includes(f)) continue;
+
+            // Group header (I2V / T2V)
+            if (item.group !== lastGroup && item.group) {
+                const header = document.createElement("div");
+                header.textContent = `── ${item.group} ──`;
+                header.style.cssText = "padding: 4px 10px; color: #888; font-size: 11px; background:#262626;";
+                list.appendChild(header);
+                lastGroup = item.group;
+                lastSubfolder = undefined;
+            } else if (!item.group) {
+                lastGroup = undefined;
+                lastSubfolder = undefined;
+            }
+
+            // Subfolder sub-header (only when grouped under I2V/T2V)
+            if (item.group && item.subfolder && item.subfolder !== lastSubfolder) {
+                const sub = document.createElement("div");
+                sub.textContent = `📁 ${item.subfolder}`;
+                sub.style.cssText = "padding: 3px 10px 3px 18px; color: #aaa; font-size: 11px; background:#222;";
+                list.appendChild(sub);
+                lastSubfolder = item.subfolder;
+            } else if (item.group && !item.subfolder) {
+                lastSubfolder = "";
+            }
+
+            const row = document.createElement("div");
+            row.textContent = item.display;
+            row.title = item.value || "None";
+            row.dataset.idx = visibleItems.length;
+            const pad = item.subfolder ? "6px 12px 6px 28px" : "6px 12px";
+            row.style.cssText = `padding: ${pad}; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;`;
+            row.addEventListener("mouseenter", () => {
+                selectedIdx = parseInt(row.dataset.idx);
+                updateHighlight();
+            });
+            row.addEventListener("click", () => choose(item.value));
+            list.appendChild(row);
+            visibleItems.push({ item, el: row });
+        }
+        if (visibleItems.length === 0) {
+            const empty = document.createElement("div");
+            empty.textContent = "(no matches)";
+            empty.style.cssText = "padding: 10px; color: #888; font-style: italic;";
+            list.appendChild(empty);
+        }
+        selectedIdx = Math.min(selectedIdx, Math.max(0, visibleItems.length - 1));
+        updateHighlight();
+    };
+
+    const updateHighlight = () => {
+        visibleItems.forEach((vi, i) => {
+            vi.el.style.background = i === selectedIdx ? "#3a5a8a" : "transparent";
+        });
+        if (visibleItems[selectedIdx]) {
+            visibleItems[selectedIdx].el.scrollIntoView({ block: "nearest" });
+        }
+    };
+
+    input.addEventListener("input", () => render(input.value));
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            selectedIdx = Math.min(selectedIdx + 1, visibleItems.length - 1);
+            updateHighlight();
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            selectedIdx = Math.max(selectedIdx - 1, 0);
+            updateHighlight();
+        } else if (e.key === "Enter") {
+            e.preventDefault();
+            if (visibleItems[selectedIdx]) choose(visibleItems[selectedIdx].item.value);
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            close();
+        }
+    });
+
+    overlay.addEventListener("mousedown", (e) => {
+        if (!panel.contains(e.target)) close();
+    });
+
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    render("");
+    // Defer focus until after the triggering click event finishes to avoid focus steal
+    requestAnimationFrame(() => {
+        input.focus();
+        input.select();
     });
 }
 
 // Find matching LoRA in the opposite HIGH/LOW folder
 async function findMatchingLora(loraName, sourceType) {
     try {
-        const resp = await api.fetchApi("/wan_loras/find_match", {
+        const resp = await api.fetchApi("/hermes/wan_loras/find_match", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -134,7 +332,7 @@ function showDropdownMenu(event, items, title, callback) {
 }
 
 app.registerExtension({
-    name: "comfy.WANDualLoraLoader",
+    name: "hermes.WANDualLoraLoader",
 
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name !== "WANDualLoraLoader") {
@@ -166,49 +364,40 @@ app.registerExtension({
             this.currentPreset = "None";
             this.saveAsName = "";
 
-            // Fetch available LoRAs
-            this.refreshLoraLists();
-
-            // Fetch preset data
-            this.fetchPresets();
-
             // Create the dual LoRA panel as a custom widget
             this.createDualLoraWidget();
-
-            // Listen for preset updates from server
-            this.setupPresetListener();
         };
 
-        // Setup listener for preset updates
-        nodeType.prototype.setupPresetListener = function() {
-            const node = this;
-            api.addEventListener("hermes-presets-update", (event) => {
-                if (event.detail && event.detail.lists) {
-                    node.presetLists = event.detail.lists;
-                    node.setDirtyCanvas(true);
-                }
-            });
+        const origOnAdded = nodeType.prototype.onAdded;
+        nodeType.prototype.onAdded = function() {
+            origOnAdded?.apply(this, arguments);
+            liveNodes.add(this);
+            this.refreshLoraLists();
+            this.fetchPresets();
         };
 
-        // Fetch presets from server
-        nodeType.prototype.fetchPresets = async function() {
-            try {
-                const resp = await api.fetchApi("/hermes/presets/init", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({})
-                });
-                if (resp.ok) {
-                    const data = await resp.json();
-                    this.presetLists = data.lists || { "Default": {} };
-                    if (!this.presetLists[this.currentList]) {
-                        this.currentList = Object.keys(this.presetLists)[0] || "Default";
-                    }
-                    this.setDirtyCanvas(true);
-                }
-            } catch (e) {
-                console.warn("Failed to fetch presets:", e);
+        const origOnRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function() {
+            liveNodes.delete(this);
+            return origOnRemoved?.apply(this, arguments);
+        };
+
+        // Take a fresh copy of the preset lists (from the server or a broadcast)
+        nodeType.prototype.applyPresetLists = function(lists) {
+            this.presetLists = lists && Object.keys(lists).length ? lists : { "Default": {} };
+            if (!this.presetLists[this.currentList]) {
+                this.currentList = Object.keys(this.presetLists)[0];
             }
+            // the selected preset may have been deleted by another client
+            if (this.currentPreset !== "None" && !this.presetLists[this.currentList]?.[this.currentPreset]) {
+                this.currentPreset = "None";
+            }
+            this.setDirtyCanvas(true);
+        };
+
+        nodeType.prototype.fetchPresets = async function(force = false) {
+            const lists = await getPresetLists(force);
+            if (lists) this.applyPresetLists(lists);
         };
 
         // Create custom widget for the dual LoRA panel
@@ -218,16 +407,9 @@ app.registerExtension({
             const widget = {
                 name: "wan_dual_lora_panel",
                 type: "custom",
+                serialize: false,
                 options: { serialize: false },
-                _value: { high: [], low: [] },
-
-                get value() {
-                    return this._value;
-                },
-
-                set value(v) {
-                    this._value = v || { high: [], low: [] };
-                },
+                value: null,
 
                 draw: function(ctx, node, width, y, height) {
                     node.drawDualLoraPanel(ctx, width, y);
@@ -247,7 +429,6 @@ app.registerExtension({
             };
 
             this.addCustomWidget(widget);
-            this.dualLoraWidget = widget;
         };
 
         // Grow node size if needed (never shrink)
@@ -261,9 +442,8 @@ app.registerExtension({
         };
 
         // Refresh LoRA file lists from server
-        nodeType.prototype.refreshLoraLists = async function() {
-            this.loraListsHigh = await fetchLoraList('high');
-            this.loraListsLow = await fetchLoraList('low');
+        nodeType.prototype.refreshLoraLists = async function(force = false) {
+            [this.loraListsHigh, this.loraListsLow] = await getLoraLists(force);
             this.setDirtyCanvas(true);
         };
 
@@ -517,7 +697,7 @@ app.registerExtension({
 
             ctx.fillStyle = lora.on ? "#fff" : "#888";
             ctx.textAlign = "center";
-            ctx.fillText(lora.strength.toFixed(2), posX + strengthWidth/2, y + height/2);
+            ctx.fillText(Number(lora.strength).toFixed(2), posX + strengthWidth/2, y + height/2);
 
             const strengthArea = { x: posX, y: y + 2, w: strengthWidth, h: height - 4 };
 
@@ -577,6 +757,10 @@ app.registerExtension({
                     const presets = ["None", ...Object.keys(this.presetLists[this.currentList] || {})];
                     showDropdownMenu(event, presets, "Select Preset", (selected) => {
                         this.currentPreset = selected;
+                        // Pre-fill the save name so the preset is easy to overwrite
+                        if (selected && selected !== "None") {
+                            this.saveAsName = selected;
+                        }
                         this.setDirtyCanvas(true);
                     });
                     return true;
@@ -628,8 +812,7 @@ app.registerExtension({
                 if (this.isInArea(pos, areas.toggle)) {
                     if (list[index]) {
                         list[index].on = !list[index].on;
-                        this.syncLoraWidgets();
-                        this.setDirtyCanvas(true);
+                        this.commitLoras();
                     }
                     return true;
                 }
@@ -678,13 +861,12 @@ app.registerExtension({
                     })
                 });
 
-                if (resp.ok) {
-                    this.currentPreset = this.saveAsName.trim();
-                    this.setDirtyCanvas(true);
-                }
+                if (!resp.ok) throw new Error(await errorText(resp));
+                this.currentPreset = this.saveAsName.trim();
+                this.setDirtyCanvas(true);
             } catch (e) {
                 console.error("Failed to save preset:", e);
-                alert("Failed to save preset");
+                alert(`Failed to save preset: ${e.message}`);
             }
         };
 
@@ -693,13 +875,16 @@ app.registerExtension({
             // "None" clears everything
             if (!this.currentPreset || this.currentPreset === "None") {
                 const promptWidget = this.widgets.find(w => w.name === "prompt");
+                const hasContent = this.highLoras.length || this.lowLoras.length || promptWidget?.value;
+                if (hasContent && !confirm("Clear the prompt and all LoRAs?")) {
+                    return;
+                }
                 if (promptWidget) {
                     promptWidget.value = "";
                 }
                 this.highLoras = [];
                 this.lowLoras = [];
-                this.syncLoraWidgets();
-                this.setDirtyCanvas(true);
+                this.commitLoras();
                 return;
             }
 
@@ -713,29 +898,24 @@ app.registerExtension({
                     })
                 });
 
-                if (resp.ok) {
-                    const data = await resp.json();
-                    const preset = data.preset;
+                if (!resp.ok) throw new Error(await errorText(resp));
+                const { preset } = await resp.json();
 
-                    if (preset) {
-                        // Set prompt
-                        const promptWidget = this.widgets.find(w => w.name === "prompt");
-                        if (promptWidget && preset.prompt !== undefined) {
-                            promptWidget.value = preset.prompt;
-                        }
-
-                        // Set LoRAs
-                        this.highLoras = (preset.highLoras || []).map(l => ({...l}));
-                        this.lowLoras = (preset.lowLoras || []).map(l => ({...l}));
-
-                        this.syncLoraWidgets();
-                        this.growSizeIfNeeded();
-                        this.setDirtyCanvas(true);
-                    }
+                const promptWidget = this.widgets.find(w => w.name === "prompt");
+                if (promptWidget && preset.prompt !== undefined) {
+                    promptWidget.value = preset.prompt;
                 }
+                this.highLoras = (preset.highLoras || []).map(normalizeLora);
+                this.lowLoras = (preset.lowLoras || []).map(normalizeLora);
+
+                // Pre-fill the save name so the loaded preset is easy to re-save
+                this.saveAsName = this.currentPreset;
+
+                this.commitLoras();
+                this.growSizeIfNeeded();
             } catch (e) {
                 console.error("Failed to load preset:", e);
-                alert("Failed to load preset");
+                alert(`Failed to load preset: ${e.message}`);
             }
         };
 
@@ -759,13 +939,12 @@ app.registerExtension({
                     })
                 });
 
-                if (resp.ok) {
-                    this.currentPreset = "None";
-                    this.setDirtyCanvas(true);
-                }
+                if (!resp.ok) throw new Error(await errorText(resp));
+                this.currentPreset = "None";
+                this.setDirtyCanvas(true);
             } catch (e) {
                 console.error("Failed to delete preset:", e);
-                alert("Failed to delete preset");
+                alert(`Failed to delete preset: ${e.message}`);
             }
         };
 
@@ -788,7 +967,7 @@ app.registerExtension({
                     // Check if already exists in this list
                     const alreadyInList = list.some(l => l.lora === selected);
                     if (alreadyInList) {
-                        console.log(`LoRA already in ${type.toUpperCase()} list: ${selected}`);
+                        console.debug(`LoRA already in ${type.toUpperCase()} list: ${selected}`);
                         return;
                     }
 
@@ -810,11 +989,11 @@ app.registerExtension({
                                 lora: matchingLora,
                                 strength: 1.0
                             });
-                            console.log(`Auto-added matching ${otherType.toUpperCase()} LoRA: ${matchingLora}`);
+                            console.debug(`Auto-added matching ${otherType.toUpperCase()} LoRA: ${matchingLora}`);
                         }
                     }
 
-                    this.syncLoraWidgets();
+                    this.commitLoras();
                     this.growSizeIfNeeded();
                     this.setDirtyCanvas(true);
                 }
@@ -830,27 +1009,26 @@ app.registerExtension({
                 if (selected === null) {
                     // "None" selected - remove this LoRA from the list
                     list.splice(index, 1);
-                    this.syncLoraWidgets();
-                    this.setDirtyCanvas(true);
+                    this.commitLoras();
                 } else if (selected && list[index]) {
                     list[index].lora = selected;
-                    this.syncLoraWidgets();
-                    this.setDirtyCanvas(true);
+                    this.commitLoras();
                 }
             });
         };
 
         // Edit strength value - use canvas.prompt like Power Lora Loader
         nodeType.prototype.editStrength = function(type, index, event) {
-            const list = type === 'high' ? this.highLoras : this.lowLoras;
-            if (!list[index]) return;
+            const row = (type === 'high' ? this.highLoras : this.lowLoras)[index];
+            if (!row) return;
 
-            app.canvas.prompt("Strength", list[index].strength.toString(), (value) => {
+            // the prompt is not modal: rows may be removed or replaced before Enter
+            app.canvas.prompt("Strength", String(row.strength), (value) => {
                 const parsed = parseFloat(value);
-                if (!isNaN(parsed)) {
-                    list[index].strength = parsed;
-                    this.syncLoraWidgets();
-                    this.setDirtyCanvas(true);
+                const stillThere = this.highLoras.includes(row) || this.lowLoras.includes(row);
+                if (!isNaN(parsed) && stillThere) {
+                    row.strength = parsed;
+                    this.commitLoras();
                 }
             }, event);
         };
@@ -882,6 +1060,13 @@ app.registerExtension({
             }
         };
 
+        // Apply a user edit: rebuild the backend widgets, redraw, record for undo
+        nodeType.prototype.commitLoras = function() {
+            this.syncLoraWidgets();
+            this.setDirtyCanvas(true);
+            markWorkflowChanged();
+        };
+
         // Add a hidden widget for a LoRA entry
         nodeType.prototype.addLoraWidget = function(name, loraData, loraType) {
             const widget = {
@@ -899,8 +1084,11 @@ app.registerExtension({
         };
 
         // Right-click context menu
+        const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
         nodeType.prototype.getExtraMenuOptions = function(canvas, options) {
-            const pos = canvas.graph_mouse;
+            origGetExtraMenuOptions?.apply(this, arguments);
+            // hit areas are node-relative, graph_mouse is in graph space
+            const pos = [canvas.graph_mouse[0] - this.pos[0], canvas.graph_mouse[1] - this.pos[1]];
 
             // Check if over a LoRA row
             for (const [key, areas] of Object.entries(this.loraHitAreas || {})) {
@@ -916,8 +1104,7 @@ app.registerExtension({
                             content: "Move Up",
                             callback: () => {
                                 [list[index-1], list[index]] = [list[index], list[index-1]];
-                                this.syncLoraWidgets();
-                                this.setDirtyCanvas(true);
+                                this.commitLoras();
                             }
                         });
                     }
@@ -927,8 +1114,7 @@ app.registerExtension({
                             content: "Move Down",
                             callback: () => {
                                 [list[index], list[index+1]] = [list[index+1], list[index]];
-                                this.syncLoraWidgets();
-                                this.setDirtyCanvas(true);
+                                this.commitLoras();
                             }
                         });
                     }
@@ -937,7 +1123,7 @@ app.registerExtension({
                         content: "Remove LoRA",
                         callback: () => {
                             list.splice(index, 1);
-                            this.syncLoraWidgets();
+                            this.commitLoras();
                             this.setSize(this.computeSize());
                             this.setDirtyCanvas(true);
                         }
@@ -950,14 +1136,16 @@ app.registerExtension({
             options.push(null);
             options.push({
                 content: "Refresh LoRA Lists",
-                callback: () => {
-                    this.refreshLoraLists();
+                callback: async () => {
+                    await getLoraLists(true);
+                    for (const node of liveNodes) node.refreshLoraLists();
                 }
             });
             options.push({
                 content: "Refresh Presets",
-                callback: () => {
-                    this.fetchPresets();
+                callback: async () => {
+                    const lists = await getPresetLists(true);
+                    if (lists) for (const node of liveNodes) node.applyPresetLists(lists);
                 }
             });
         };
@@ -978,22 +1166,9 @@ app.registerExtension({
                     if (value && typeof value === 'object' && value.lora !== undefined) {
                         // Check if it's a HIGH or LOW LoRA based on stored type
                         if (value._type === 'high') {
-                            this.highLoras.push({ on: value.on, lora: value.lora, strength: value.strength });
+                            this.highLoras.push(normalizeLora(value));
                         } else if (value._type === 'low') {
-                            this.lowLoras.push({ on: value.on, lora: value.lora, strength: value.strength });
-                        }
-                    }
-                }
-            }
-
-            // Also check widgets directly (for compatibility)
-            if (this.highLoras.length === 0 && this.lowLoras.length === 0 && this.widgets) {
-                for (const w of this.widgets) {
-                    if (w.name && w.value && typeof w.value === 'object' && w.value.lora !== undefined) {
-                        if (w.name.startsWith('HIGH_LORA_')) {
-                            this.highLoras.push({ ...w.value });
-                        } else if (w.name.startsWith('LOW_LORA_')) {
-                            this.lowLoras.push({ ...w.value });
+                            this.lowLoras.push(normalizeLora(value));
                         }
                     }
                 }
@@ -1013,16 +1188,6 @@ app.registerExtension({
             } else {
                 this.setSize(minSize);
             }
-        };
-
-        // Override serialize to save LoRA data
-        const origSerialize = nodeType.prototype.serialize;
-        nodeType.prototype.serialize = function() {
-            // Ensure widgets are synced before serialization
-            this.syncLoraWidgets();
-
-            const data = origSerialize ? origSerialize.apply(this, arguments) : {};
-            return data;
         };
 
         // Override computeSize

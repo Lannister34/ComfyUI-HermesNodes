@@ -1,12 +1,16 @@
 [project]
 name = "comfyui-hermes-nodes"
-description = "WAN Dual LoRA Loader"
-version = "1.1.1"
+description = "WAN 2.2 dual-model LoRA loader and samplers, image prep helpers, and in-graph video preview/compare for ComfyUI"
+version = "1.2.0"
 license = { file = "LICENSE" }
+# torch, numpy, Pillow, av and aiohttp all come with ComfyUI itself
+dependencies = []
 
 [project.urls]
 Repository = "https://github.com/Lannister34/ComfyUI-HermesNodes"
+"Bug Tracker" = "https://github.com/Lannister34/ComfyUI-HermesNodes/issues"
 
 [tool.comfy]
 PublisherId = "lannister34"
 DisplayName = "Hermes Nodes"
+Icon = ""
